@@ -25,7 +25,7 @@ data_atual = agora.date()
 # ======================
 # 📍 CAPITAIS
 # ======================
-capitais_df = pd.read_excel("lat_lon_capitais_br.xlsx")
+capitais_df = pd.read_excel("./lat_lon_capitais_br.xlsx")
 
 # ======================
 # 🛁 COLETA DOS DADOS DO OPEN-METEO
@@ -221,7 +221,7 @@ def atualizar_grafico(data, capital):
     return fig
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8051)
+    app.run(debug=False, host="0.0.0.0", port=10000)
 
 
 
