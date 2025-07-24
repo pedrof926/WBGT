@@ -139,7 +139,7 @@ app.layout = dbc.Container([
     # 🔷 GRÁFICO E MAPA
     dbc.Row([
         dbc.Col([
-            dcc.Graph(id='grafico-horario', style={"height": "800px"})
+            dcc.Graph(id='grafico-horario', style={"height": "700px"})
         ], width=5),
 
         dbc.Col([
