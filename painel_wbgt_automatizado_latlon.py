@@ -140,8 +140,8 @@ app.layout = dbc.Container([
             dcc.RadioItems(
                 id="filtro-ambiente",
                 options=[
-                    {"label": "Externo (sol)", "value": "out"},
-                    {"label": "Interno / Sombra", "value": "in"},
+                    {"label": "Externo", "value": "out"},
+                    {"label": "Interno", "value": "in"},
                 ],
                 value="out",
                 inline=True
