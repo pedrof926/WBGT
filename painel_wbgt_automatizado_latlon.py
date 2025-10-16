@@ -12,6 +12,7 @@ import requests
 # ⚙️ CONFIGURAÇÕES
 # ======================
 url = "https://api.open-meteo.com/v1/forecast"
+
 color_map = {
     "Normal": "rgb(226,240,217)",
     "Atenção": "rgb(255,242,204)",
@@ -29,47 +30,69 @@ data_atual = agora.date()
 # ======================
 capitais_df = pd.read_excel("./lat_lon_capitais_br.xlsx")
 
+# (Opcional) Albedo por capital — ajuste se quiser. Se não estiver no dict, usa o padrão.
+ALBEDO_PADRAO = 0.22  # urbano claro típico; asfalto ~0.12–0.15, concreto claro ~0.25–0.30
+ALBEDO_POR_CAPITAL = {
+    # "Brasília": 0.24,
+    # "São Paulo": 0.20,
+    # "Rio de Janeiro": 0.22,
+}
+
 # ======================
-# 🔬 FÍSICA DO GLOBO NEGRO
+# 🔬 FÍSICA DO GLOBO NEGRO (Tg)
 # ======================
 SIGMA = 5.670374419e-8   # Stefan-Boltzmann [W m-2 K-4]
 EPS   = 0.95             # emissividade do globo preto
-ALPHA = 0.95             # absortância para curta-onda (pintura preta)
-D     = 0.15             # diâmetro do globo [m]
-AP_AS = 0.25             # razão área projetada/área de superfície da esfera (=1/4)
+ALPHA_DEFAULT = 0.95     # absortância do globo para curta-onda
+AP_AS = 0.25             # área projetada / área de superfície da esfera
+# D (diâmetro) não entra explicitamente nesta forma (agregado nos coeficientes)
 
 def _hc_sphere(wind_ms: float) -> float:
     """
-    Coeficiente de convecção para esfera em ar, simplificado.
-    Correl. empírica estável para uso operacional (W m-2 K-1).
+    Coeficiente de convecção convectivo simplificado para esfera em ar (W m-2 K-1).
+    Robusto para uso operacional em painel.
     """
-    v = max(wind_ms, 0.1)                  # evita V=0 (singularidade)
-    return 1.4 * np.sqrt(v) + 0.0          # McAdams-like; robusto pra painel
+    v = max(float(wind_ms), 0.1)  # evita singularidade
+    return 1.4 * np.sqrt(v)
 
-def tg_black_globe(Ta_C, GHI_Wm2, wind_ms, longwave_K=None, max_iter=50, tol=1e-3):
+def tg_black_globe(
+    Ta_C: float,
+    GHI_Wm2: float,
+    wind_ms: float,
+    lw_down_Wm2: float = None,   # Onda longa descendente (W/m²) — opcional
+    albedo: float = ALBEDO_PADRAO,
+    alpha_sw: float = ALPHA_DEFAULT,
+    max_iter: int = 60,
+    tol: float = 1e-3
+) -> float:
     """
-    Resolve Tg (°C) por balanço de energia da esfera:
-      α * GHI * (Ap/As)         [absorção curta-onda]
-    + εσ (T_sur^4 - Tg^4)       [troca longa-onda]
-    - h_c (Tg - Ta)             [convecção]
+    Tg (°C) via balanço de energia do globo negro:
+      curto-onda (incidente + refletido pelo solo via albedo) +
+      longa-onda descendente (atmosfera/nuvens) -
+      emissão do globo -
+      convecção com o ar
     = 0
-
-    T_sur (temperatura radiante média de fundo) é aproximada por Ta (boa aproximação diurna).
-    Se quiser refinar à noite, passe longwave_K como temperatura radiante equivalente.
+    Resolve por Newton-Raphson.
     """
     Ta_K = Ta_C + 273.15
-    # Temperatura radiante média do entorno (aprox. Ta_K)
-    T_sur_K = Ta_K if longwave_K is None else longwave_K
 
-    # Termo de radiação de onda curta absorvido por unidade de área da esfera
-    q_sw = ALPHA * GHI_Wm2 * AP_AS  # [W m-2]
+    # Curto-onda absorvido (incidente + reflexão do solo por albedo)
+    ghi = max(float(GHI_Wm2), 0.0)
+    ghi_total = ghi * (1.0 + max(float(albedo), 0.0))
+    q_sw = alpha_sw * ghi_total * AP_AS  # W/m²
 
-    # Iteração de Newton: F(Tg) = q_sw + EPS*SIGMA*(T_sur^4 - Tg^4) - h_c*(Tg - Ta) = 0
+    # Longa-onda descendente: se não houver, usa fallback σ·Ta^4
+    if (lw_down_Wm2 is None) or (not np.isfinite(lw_down_Wm2)):
+        lw_down_Wm2 = SIGMA * Ta_K**4
+
+    # Iteração Newton-Raphson
     Tg_K = Ta_K
     for _ in range(max_iter):
-        h_c = _hc_sphere(wind_ms)
-        F   = q_sw + EPS*SIGMA*(T_sur_K**4 - Tg_K**4) - h_c*(Tg_K - Ta_K)
-        dF  = -4.0*EPS*SIGMA*(Tg_K**3) - h_c
+        hc = _hc_sphere(wind_ms)
+        # Balanço radiativo-convectivo:
+        # curto-onda + LW↓ - emissão globo (εσTg^4) - convecção (h_c (Tg - Ta)) = 0
+        F  = q_sw + EPS*lw_down_Wm2 - EPS*SIGMA*Tg_K**4 - hc*(Tg_K - Ta_K)
+        dF = -4.0*EPS*SIGMA*(Tg_K**3) - hc
         step = -F / dF
         Tg_K_new = Tg_K + step
         if abs(step) < tol:
@@ -86,57 +109,85 @@ def coletar_dados():
     dados = []
     for _, row in capitais_df.iterrows():
         nome = row["Capital"]
-        lat = row["Latitude"]
-        lon = row["Longitude"]
+        lat = float(row["Latitude"])
+        lon = float(row["Longitude"])
+        albedo_local = ALBEDO_POR_CAPITAL.get(nome, ALBEDO_PADRAO)
         try:
+            # Tentamos pedir também a "terrestrial_radiation" (LW↓) — o provedor pode aceitar ou ignorar.
             response = requests.get(
                 url,
                 params={
                     "latitude": lat,
                     "longitude": lon,
-                    "hourly": "temperature_2m,wet_bulb_temperature_2m,shortwave_radiation,wind_speed_10m",
+                    "hourly": "temperature_2m,wet_bulb_temperature_2m,shortwave_radiation,wind_speed_10m,terrestrial_radiation",
                     "timezone": "America/Sao_Paulo"
                 },
                 verify=False
             )
             result = response.json()
             df = pd.DataFrame(result["hourly"])
-            df["Capital"]  = nome
-            df["Latitude"] = lat
-            df["Longitude"]= lon
+            df["Capital"]   = nome
+            df["Latitude"]  = lat
+            df["Longitude"] = lon
+            df["Albedo"]    = albedo_local
 
-            # === RENOMEAR (facilita leitura) ===
-            df = df.rename(columns={
-                "temperature_2m": "Ta",               # °C
-                "wet_bulb_temperature_2m": "Tw",      # °C
-                "shortwave_radiation": "GHI",         # W m-2 (média/instantâneo horário)
-                "wind_speed_10m": "Wind"              # m s-1
-            })
+            # Renomear para nomes curtos
+            rename_map = {
+                "temperature_2m": "Ta",                # °C
+                "wet_bulb_temperature_2m": "Tw",       # °C
+                "shortwave_radiation": "GHI",          # W/m²
+                "wind_speed_10m": "Wind",              # m/s
+            }
+            # LW↓: vários candidatos possíveis (depende do provedor)
+            for cand in ["surface_thermal_radiation_downwards", "terrestrial_radiation",
+                         "longwave_radiation_downwelling", "lw_down"]:
+                if cand in df.columns:
+                    rename_map[cand] = "LW_down"
 
-            # === Tg EXTERNO (com sol): usa GHI real ===
+            df = df.rename(columns=rename_map)
+
+            # Se a coluna LW_down não existir, cria vazia (fallback dentro da função cuidará)
+            if "LW_down" not in df.columns:
+                df["LW_down"] = np.nan
+
+            # ======================
+            # 🔢 CÁLCULO DO Tg
+            # ======================
+
+            # Externo (com sol): usa GHI real + reflexão por albedo
             df["Tg_out"] = [
-                tg_black_globe(Ta, ghi, v)
-                for Ta, ghi, v in zip(df["Ta"].values, df["GHI"].values, df["Wind"].values)
+                tg_black_globe(Ta, ghi, v, lw_down_Wm2=lw, albedo=alb)
+                for Ta, ghi, v, lw, alb in zip(
+                    df["Ta"].values, df["GHI"].values, df["Wind"].values, df["LW_down"].values, df["Albedo"].values
+                )
             ]
 
-            # === Tg INTERNO (sombra): sem radiação direta → GHI=0 ===
+            # Interno (sombra): GHI = 0, sem reflexão; ainda pode considerar LW↓
             df["Tg_in"] = [
-                tg_black_globe(Ta, 0.0, v)
-                for Ta, v in zip(df["Ta"].values, df["Wind"].values)
+                tg_black_globe(Ta, 0.0, v, lw_down_Wm2=lw, albedo=0.0)
+                for Ta, v, lw in zip(
+                    df["Ta"].values, df["Wind"].values, df["LW_down"].values
+                )
             ]
 
-            # === WBGT OFICIAIS ===
-            # Externo: 0.7*Tw + 0.2*Tg + 0.1*Ta
+            # ======================
+            # 🧮 WBGT — FÓRMULAS OFICIAIS
+            # ======================
+            # Externo (sol): 0.7*Tw + 0.2*Tg + 0.1*Ta
             df["WBGT_out"] = (0.7*df["Tw"] + 0.2*df["Tg_out"] + 0.1*df["Ta"]).round(1)
-            # Interno: 0.7*Tw + 0.3*Tg
+            # Interno (sombra): 0.7*Tw + 0.3*Tg
             df["WBGT_in"]  = (0.7*df["Tw"] + 0.3*df["Tg_in"]).round(1)
 
-            # Coluna padrão (usaremos conforme o ambiente escolhido)
+            # Coluna padrão (usada pelo mapa inicialmente)
             df["WBGT"] = df["WBGT_out"]
 
             dados.append(df)
+
         except Exception as e:
             print(f"Erro em {nome}: {e}")
+
+    if not dados:
+        raise RuntimeError("Nenhum dado retornado pela API. Verifique a conexão/variáveis.")
     return pd.concat(dados, ignore_index=True)
 
 df_previsao = coletar_dados()
@@ -377,6 +428,7 @@ def atualizar_recomendacao(data, capital, hora, ambiente):
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=10000)
+
 
 
 
