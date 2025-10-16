@@ -1,9 +1,11 @@
+# -*- coding: utf-8 -*-
 import dash
 from dash import html, dcc, Input, Output
 import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.express as px
 from datetime import datetime
+import numpy as np
 import requests
 
 # ======================
@@ -28,6 +30,56 @@ data_atual = agora.date()
 capitais_df = pd.read_excel("./lat_lon_capitais_br.xlsx")
 
 # ======================
+# 🔬 FÍSICA DO GLOBO NEGRO
+# ======================
+SIGMA = 5.670374419e-8   # Stefan-Boltzmann [W m-2 K-4]
+EPS   = 0.95             # emissividade do globo preto
+ALPHA = 0.95             # absortância para curta-onda (pintura preta)
+D     = 0.15             # diâmetro do globo [m]
+AP_AS = 0.25             # razão área projetada/área de superfície da esfera (=1/4)
+
+def _hc_sphere(wind_ms: float) -> float:
+    """
+    Coeficiente de convecção para esfera em ar, simplificado.
+    Correl. empírica estável para uso operacional (W m-2 K-1).
+    """
+    v = max(wind_ms, 0.1)                  # evita V=0 (singularidade)
+    return 1.4 * np.sqrt(v) + 0.0          # McAdams-like; robusto pra painel
+
+def tg_black_globe(Ta_C, GHI_Wm2, wind_ms, longwave_K=None, max_iter=50, tol=1e-3):
+    """
+    Resolve Tg (°C) por balanço de energia da esfera:
+      α * GHI * (Ap/As)         [absorção curta-onda]
+    + εσ (T_sur^4 - Tg^4)       [troca longa-onda]
+    - h_c (Tg - Ta)             [convecção]
+    = 0
+
+    T_sur (temperatura radiante média de fundo) é aproximada por Ta (boa aproximação diurna).
+    Se quiser refinar à noite, passe longwave_K como temperatura radiante equivalente.
+    """
+    Ta_K = Ta_C + 273.15
+    # Temperatura radiante média do entorno (aprox. Ta_K)
+    T_sur_K = Ta_K if longwave_K is None else longwave_K
+
+    # Termo de radiação de onda curta absorvido por unidade de área da esfera
+    q_sw = ALPHA * GHI_Wm2 * AP_AS  # [W m-2]
+
+    # Iteração de Newton: F(Tg) = q_sw + EPS*SIGMA*(T_sur^4 - Tg^4) - h_c*(Tg - Ta) = 0
+    Tg_K = Ta_K
+    for _ in range(max_iter):
+        h_c = _hc_sphere(wind_ms)
+        F   = q_sw + EPS*SIGMA*(T_sur_K**4 - Tg_K**4) - h_c*(Tg_K - Ta_K)
+        dF  = -4.0*EPS*SIGMA*(Tg_K**3) - h_c
+        step = -F / dF
+        Tg_K_new = Tg_K + step
+        if abs(step) < tol:
+            Tg_K = Tg_K_new
+            break
+        Tg_K = Tg_K_new
+
+    return float(Tg_K - 273.15)
+
+# ======================
 # 🛁 COLETA DOS DADOS DO OPEN-METEO
 # ======================
 def coletar_dados():
@@ -37,35 +89,49 @@ def coletar_dados():
         lat = row["Latitude"]
         lon = row["Longitude"]
         try:
-            response = requests.get(url, params={
-                "latitude": lat,
-                "longitude": lon,
-                "hourly": "temperature_2m,wet_bulb_temperature_2m,shortwave_radiation,wind_speed_10m",
-                "timezone": "America/Sao_Paulo"
-            }, verify=False)
+            response = requests.get(
+                url,
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "hourly": "temperature_2m,wet_bulb_temperature_2m,shortwave_radiation,wind_speed_10m",
+                    "timezone": "America/Sao_Paulo"
+                },
+                verify=False
+            )
             result = response.json()
             df = pd.DataFrame(result["hourly"])
-            df["Capital"] = nome
+            df["Capital"]  = nome
             df["Latitude"] = lat
-            df["Longitude"] = lon
+            df["Longitude"]= lon
 
-            # === CÁLCULOS WBGT ===
-            # Renomear para nomes curtos (apenas para facilitar leitura)
+            # === RENOMEAR (facilita leitura) ===
             df = df.rename(columns={
-                "temperature_2m": "Ta",
-                "wet_bulb_temperature_2m": "Tw",
-                "shortwave_radiation": "GHI",
-                "wind_speed_10m": "Wind"
+                "temperature_2m": "Ta",               # °C
+                "wet_bulb_temperature_2m": "Tw",      # °C
+                "shortwave_radiation": "GHI",         # W m-2 (média/instantâneo horário)
+                "wind_speed_10m": "Wind"              # m s-1
             })
 
-            # Interno / Sombra (aproximação ISO: Tg ~ Ta): WBGT_in = 0.7*Tw + 0.3*Ta
-            df["WBGT_in"]  = (0.7 * df["Tw"] + 0.3 * df["Ta"]).round(1)
+            # === Tg EXTERNO (com sol): usa GHI real ===
+            df["Tg_out"] = [
+                tg_black_globe(Ta, ghi, v)
+                for Ta, ghi, v in zip(df["Ta"].values, df["GHI"].values, df["Wind"].values)
+            ]
 
-            # Externo / Sol (mantendo sua ideia original com termo de radiação):
-            # WBGT_out = 0.7*Tw + 0.2*Ta + 0.1*(GHI/100)
-            df["WBGT_out"] = (0.7 * df["Tw"] + 0.2 * df["Ta"] + 0.1 * (df["GHI"] / 100.0)).round(1)
+            # === Tg INTERNO (sombra): sem radiação direta → GHI=0 ===
+            df["Tg_in"] = [
+                tg_black_globe(Ta, 0.0, v)
+                for Ta, v in zip(df["Ta"].values, df["Wind"].values)
+            ]
 
-            # Compat: manter coluna "WBGT" padrão (usaremos conforme o ambiente escolhido)
+            # === WBGT OFICIAIS ===
+            # Externo: 0.7*Tw + 0.2*Tg + 0.1*Ta
+            df["WBGT_out"] = (0.7*df["Tw"] + 0.2*df["Tg_out"] + 0.1*df["Ta"]).round(1)
+            # Interno: 0.7*Tw + 0.3*Tg
+            df["WBGT_in"]  = (0.7*df["Tw"] + 0.3*df["Tg_in"]).round(1)
+
+            # Coluna padrão (usaremos conforme o ambiente escolhido)
             df["WBGT"] = df["WBGT_out"]
 
             dados.append(df)
@@ -79,6 +145,9 @@ df_previsao["Data"] = df_previsao["time"].dt.date
 df_previsao["Hora"] = df_previsao["time"].dt.hour
 df_previsao["Hora_str"] = df_previsao["time"].dt.strftime("%Hh")
 
+# ======================
+# 🧭 CLASSIFICAÇÃO DE RISCO
+# ======================
 def classificar_risco(wbgt):
     if wbgt < 26:
         return "Normal"
@@ -91,7 +160,6 @@ def classificar_risco(wbgt):
 
 df_previsao["Risco"] = df_previsao["WBGT"].apply(classificar_risco)
 
-# Recomendações por faixa
 RECOMENDACOES = {
     "Normal": "Hidrate-se regularmente e planeje pausas. Observe grupos sensíveis.",
     "Atenção": "Aumente pausas em sombra/área fresca; reforçar hidratação; monitorar sintomas iniciais.",
@@ -135,7 +203,6 @@ app.layout = dbc.Container([
             )
         ], width=2),
 
-        # >>> NOVO: seletor de ambiente
         dbc.Col([
             dcc.RadioItems(
                 id="filtro-ambiente",
@@ -149,15 +216,14 @@ app.layout = dbc.Container([
         ], width=5)
     ], justify="center", className="mb-2"),
 
-    # 🔷 LEGENDA MAIOR DO "RISCO DO WBGT" (ESQUERDA) + LEGENDA DO MAPA (DIREITA)
     dbc.Row([
         dbc.Col([
             html.Div("Risco do WBGT:", style={"fontSize": "18px", "marginBottom": "5px", "fontWeight": "bold", "textAlign": "center"}),
             html.Div([
-                html.Span(" Normal ", style={"backgroundColor": color_map["Normal"], "padding": "5px", "marginRight": "10px", "borderRadius": "5px"}),
+                html.Span(" Normal ",  style={"backgroundColor": color_map["Normal"],  "padding": "5px", "marginRight": "10px", "borderRadius": "5px"}),
                 html.Span(" Atenção ", style={"backgroundColor": color_map["Atenção"], "padding": "5px", "marginRight": "10px", "borderRadius": "5px"}),
-                html.Span(" Alerta ", style={"backgroundColor": color_map["Alerta"], "padding": "5px", "marginRight": "10px", "borderRadius": "5px"}),
-                html.Span(" Perigo ", style={"backgroundColor": color_map["Perigo"], "padding": "5px", "color": "white", "borderRadius": "5px"})
+                html.Span(" Alerta ",  style={"backgroundColor": color_map["Alerta"],  "padding": "5px", "marginRight": "10px", "borderRadius": "5px"}),
+                html.Span(" Perigo ",  style={"backgroundColor": color_map["Perigo"],  "padding": "5px", "color": "white", "borderRadius": "5px"})
             ], style={"textAlign": "center", "marginBottom": "10px"})
         ], width=5),
 
@@ -175,7 +241,6 @@ app.layout = dbc.Container([
         ], width=7)
     ]),
 
-    # >>> NOVO: CARD DE RECOMENDAÇÕES
     dbc.Row([
         dbc.Col([
             dbc.Card([
@@ -185,15 +250,9 @@ app.layout = dbc.Container([
         ], width=12)
     ], className="mb-3"),
 
-    # 🔷 GRÁFICO E MAPA
     dbc.Row([
-        dbc.Col([
-            dcc.Graph(id='grafico-horario', style={"height": "700px"})
-        ], width=5),
-
-        dbc.Col([
-            dcc.Graph(id='mapa-wbgt', style={"height": "600px"})
-        ], width=7)
+        dbc.Col([ dcc.Graph(id='grafico-horario', style={"height": "700px"}) ], width=5),
+        dbc.Col([ dcc.Graph(id='mapa-wbgt',    style={"height": "600px"}) ], width=7)
     ])
 ], fluid=True)
 
@@ -209,7 +268,6 @@ def atualizar_mapa(data, hora, ambiente):
         hora = hora_atual
     df_dia = df_previsao[(df_previsao["Data"] == data) & (df_previsao["Hora"] == hora)].copy()
 
-    # Seleciona WBGT conforme ambiente
     col = "WBGT_out" if ambiente == "out" else "WBGT_in"
     df_dia["WBGT"] = df_dia[col]
     df_dia["Risco"] = df_dia["WBGT"].apply(classificar_risco)
@@ -273,14 +331,13 @@ def atualizar_grafico(data, capital, ambiente):
     )
     fig.update_xaxes(title="Horas", categoryorder="array", categoryarray=[f"{h:02d}h" for h in range(24)])
     fig.update_layout(
-        yaxis_title="WBGT",
+        yaxis_title="WBGT (°C)",
         plot_bgcolor="white",
         paper_bgcolor="white",
         height=500
     )
     return fig
 
-# >>> NOVO: recomendação dinâmica
 @app.callback(
     Output("card-recomendacao", "children"),
     [Input("filtro-data", "date"),
@@ -320,6 +377,7 @@ def atualizar_recomendacao(data, capital, hora, ambiente):
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=10000)
+
 
 
 
