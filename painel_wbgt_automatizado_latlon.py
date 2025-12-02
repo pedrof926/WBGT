@@ -64,75 +64,24 @@ def tg_black_globe(Ta_C, GHI_Wm2, wind_ms, longwave_K=None, max_iter=50, tol=1e-
 # 🛁 COLETA DOS DADOS DO OPEN-METEO
 # ======================
 def coletar_dados():
-    """
-    Faz APENAS 1 requisição para todas as capitais de uma vez,
-    usando latitude/longitude em lista (para evitar 429).
-    """
-    # strings "lat1,lat2,lat3,..." e "lon1,lon2,lon3,..."
-    latitudes  = ",".join(str(lat) for lat in capitais_df["Latitude"].tolist())
-    longitudes = ",".join(str(lon) for lon in capitais_df["Longitude"].tolist())
-
-    params = {
-        "latitude": latitudes,
-        "longitude": longitudes,
-        "hourly": "temperature_2m,wet_bulb_temperature_2m,shortwave_radiation,wind_speed_10m",
-        "timezone": "America/Sao_Paulo",
-        "models": "ecmwf_ifs",
-        "forecast_days": 7,
-        "wind_speed_unit": "ms"
-    }
-
-    try:
-        response = requests.get(url, params=params, verify=False)
-        # se der 4xx/5xx, explode aqui
-        response.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        # log básico pra você ver no Render
-        print(f"[ERRO HTTP] status={response.status_code} url={response.url}")
-        raise RuntimeError(
-            f"Erro HTTP ao chamar Open-Meteo: {e}"
-        )
-    except Exception as e:
-        print(f"[ERRO GERAL REQUISIÇÃO] {e}")
-        raise RuntimeError(f"Erro ao chamar Open-Meteo: {e}")
-
-    result = response.json()
-
-    # A API, com múltiplas coordenadas, pode devolver:
-    #  - um dict (1 localização)
-    #  - uma lista de dicts (N localizações)
-    if isinstance(result, dict):
-        resultados_locais = [result]
-    elif isinstance(result, list):
-        resultados_locais = result
-    else:
-        raise RuntimeError(
-            "Resposta inesperada da API Open-Meteo (não é dict nem lista)."
-        )
-
-    dfs = []
-
-    # Garantir que não vamos além do que veio na resposta
-    n_caps = len(capitais_df)
-    n_resp = len(resultados_locais)
-    if n_resp != n_caps:
-        print(f"[AVISO] Capitais no Excel: {n_caps} | Locais na resposta: {n_resp}. Usando o mínimo.")
-    n = min(n_caps, n_resp)
-
-    for (idx, row), loc_data in zip(capitais_df.iloc[:n].iterrows(), resultados_locais[:n]):
+    dados = []
+    for _, row in capitais_df.iterrows():
         nome = row["Capital"]
-        lat  = row["Latitude"]
-        lon  = row["Longitude"]
-
+        lat = row["Latitude"]
+        lon = row["Longitude"]
         try:
-            hourly = loc_data["hourly"]
-        except KeyError:
-            print(f"[AVISO] Resposta da API para {nome} não contém chave 'hourly'. Pulando.")
-            continue
-
-        try:
-            df = pd.DataFrame(hourly)
-
+            response = requests.get(
+                url,
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "hourly": "temperature_2m,wet_bulb_temperature_2m,shortwave_radiation,wind_speed_10m",
+                    "timezone": "America/Sao_Paulo"
+                },
+                verify=False
+            )
+            result = response.json()
+            df = pd.DataFrame(result["hourly"])
             df["Capital"]  = nome
             df["Latitude"] = lat
             df["Longitude"]= lon
@@ -145,14 +94,8 @@ def coletar_dados():
             })
 
             # Tg externo (com sol) e interno (sombra)
-            df["Tg_out"] = [
-                tg_black_globe(Ta, ghi, v)
-                for Ta, ghi, v in zip(df["Ta"].values, df["GHI"].values, df["Wind"].values)
-            ]
-            df["Tg_in"]  = [
-                tg_black_globe(Ta, 0.0, v)
-                for Ta, v in zip(df["Ta"].values, df["Wind"].values)
-            ]
+            df["Tg_out"] = [tg_black_globe(Ta, ghi, v) for Ta, ghi, v in zip(df["Ta"].values, df["GHI"].values, df["Wind"].values)]
+            df["Tg_in"]  = [tg_black_globe(Ta, 0.0,  v) for Ta, v        in zip(df["Ta"].values,                 df["Wind"].values)]
 
             # WBGT oficiais (ISO)
             df["WBGT_out"] = (0.7*df["Tw"] + 0.2*df["Tg_out"] + 0.1*df["Ta"]).round(1)
@@ -161,17 +104,10 @@ def coletar_dados():
             # Coluna padrão (mantida como no original)
             df["WBGT"] = df["WBGT_out"]
 
-            dfs.append(df)
+            dados.append(df)
         except Exception as e:
-            print(f"[ERRO] Falha ao processar dados de {nome}: {e}")
-
-    if not dfs:
-        raise RuntimeError(
-            "Nenhuma capital retornou dados válidos da API Open-Meteo. "
-            "Verifique se o IP do Render não está temporariamente bloqueado ou tente novamente mais tarde."
-        )
-
-    return pd.concat(dfs, ignore_index=True)
+            print(f"Erro em {nome}: {e}")
+    return pd.concat(dados, ignore_index=True)
 
 df_previsao = coletar_dados()
 df_previsao["time"] = pd.to_datetime(df_previsao["time"])
@@ -387,7 +323,7 @@ def atualizar_grafico(data, capital, ambiente):
     )
     fig.update_xaxes(title="Horas", categoryorder="array", categoryarray=[f"{h:02d}h" for h in range(24)])
     fig.update_layout(
-        yaxis_title="WBGT (°C)",
+        yaxis_title="WBGT (°C)",   # mantido como no seu original
         plot_bgcolor="white",
         paper_bgcolor="white",
         height=500
