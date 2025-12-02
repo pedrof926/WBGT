@@ -61,66 +61,145 @@ def tg_black_globe(Ta_C, GHI_Wm2, wind_ms, longwave_K=None, max_iter=50, tol=1e-
     return float(Tg_K - 273.15)
 
 # ======================
-# 🛁 COLETA DOS DADOS DO OPEN-METEO
+# 🛁 COLETA DOS DADOS DO OPEN-METEO (ECMWF, 1 CHAMADA PARA TODAS AS CAPITAIS)
 # ======================
 def coletar_dados():
+    # Listas com as capitais e coordenadas
+    nomes = capitais_df["Capital"].tolist()
+    lats  = capitais_df["Latitude"].tolist()
+    lons  = capitais_df["Longitude"].tolist()
+
+    # Uma única requisição com todas as capitais (múltiplas coordenadas)
+    params = {
+        "latitude": ",".join(f"{lat:.4f}" for lat in lats),
+        "longitude": ",".join(f"{lon:.4f}" for lon in lons),
+        "hourly": "temperature_2m,wet_bulb_temperature_2m,shortwave_radiation,wind_speed_10m",
+        "timezone": "America/Sao_Paulo",
+        "models": "ecmwf_ifs",      # força uso do ECMWF
+        "forecast_days": 7,
+        "wind_speed_unit": "ms"     # vento em m/s
+    }
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            verify=False,
+            timeout=30
+        )
+        response.raise_for_status()
+        result = response.json()
+    except requests.exceptions.HTTPError as e:
+        status = getattr(e.response, "status_code", None)
+        print(f"Erro HTTP ao consultar Open-Meteo: {e} (status={status})")
+        if status == 429:
+            raise RuntimeError(
+                "Limite de requisições da API Open-Meteo atingido (HTTP 429). "
+                "Tente novamente em alguns minutos."
+            )
+        raise
+    except Exception as e:
+        print(f"Erro em requisição única Open-Meteo: {e}")
+        raise RuntimeError("Falha ao obter dados da API Open-Meteo.") from e
+
     dados = []
-    for _, row in capitais_df.iterrows():
-        nome = row["Capital"]
-        lat = row["Latitude"]
-        lon = row["Longitude"]
-        try:
-            params = {
-                "latitude": lat,
-                "longitude": lon,
-                "hourly": "temperature_2m,wet_bulb_temperature_2m,shortwave_radiation,wind_speed_10m",
-                "timezone": "America/Sao_Paulo",
-                "models": "ecmwf_ifs",      # força uso do ECMWF
-                "forecast_days": 7,
-                "wind_speed_unit": "ms"     # vento em m/s
-            }
 
-            response = requests.get(url, params=params, verify=False)
-            response.raise_for_status()
-            result = response.json()
+    # Quando pedimos múltiplas coordenadas, a API devolve uma LISTA de locais
+    if isinstance(result, list):
+        if len(result) != len(nomes):
+            print(
+                f"Aviso: Open-Meteo retornou {len(result)} locais "
+                f"para {len(nomes)} capitais."
+            )
 
-            # Se a API retornar erro, não terá "hourly"
-            if "hourly" not in result:
-                print(f"[DEBUG] {nome} sem 'hourly': {result}")
+        for idx, loc in enumerate(result):
+            try:
+                hourly = loc["hourly"]
+            except KeyError:
+                print(f"Resposta sem 'hourly' para índice {idx}")
                 continue
 
-            df = pd.DataFrame(result["hourly"])
-            df["Capital"]  = nome
-            df["Latitude"] = lat
-            df["Longitude"]= lon
+            df = pd.DataFrame(hourly)
 
+            nome = nomes[idx] if idx < len(nomes) else f"Loc_{idx}"
+            lat  = lats[idx]  if idx < len(lats)  else loc.get("latitude")
+            lon  = lons[idx]  if idx < len(lons)  else loc.get("longitude")
+
+            df["Capital"]   = nome
+            df["Latitude"]  = lat
+            df["Longitude"] = lon
+
+            # Renomeia para os nomes usados no resto do script
             df = df.rename(columns={
-                "temperature_2m": "Ta",               # °C
-                "wet_bulb_temperature_2m": "Tw",      # °C
-                "shortwave_radiation": "GHI",         # W m-2
-                "wind_speed_10m": "Wind"              # m s-1
+                "temperature_2m":          "Ta",   # °C
+                "wet_bulb_temperature_2m": "Tw",   # °C
+                "shortwave_radiation":     "GHI",  # W m-2
+                "wind_speed_10m":          "Wind"  # m s-1
             })
 
             # Tg externo (com sol) e interno (sombra)
-            df["Tg_out"] = [tg_black_globe(Ta, ghi, v) for Ta, ghi, v in zip(df["Ta"].values, df["GHI"].values, df["Wind"].values)]
-            df["Tg_in"]  = [tg_black_globe(Ta, 0.0,  v) for Ta, v        in zip(df["Ta"].values,                 df["Wind"].values)]
+            df["Tg_out"] = [
+                tg_black_globe(Ta, ghi, v)
+                for Ta, ghi, v in zip(df["Ta"].values, df["GHI"].values, df["Wind"].values)
+            ]
+            df["Tg_in"] = [
+                tg_black_globe(Ta, 0.0, v)
+                for Ta, v in zip(df["Ta"].values, df["Wind"].values)
+            ]
 
             # WBGT oficiais (ISO)
-            df["WBGT_out"] = (0.7*df["Tw"] + 0.2*df["Tg_out"] + 0.1*df["Ta"]).round(1)
-            df["WBGT_in"]  = (0.7*df["Tw"] + 0.3*df["Tg_in"]).round(1)
+            df["WBGT_out"] = (0.7 * df["Tw"] + 0.2 * df["Tg_out"] + 0.1 * df["Ta"]).round(1)
+            df["WBGT_in"]  = (0.7 * df["Tw"] + 0.3 * df["Tg_in"]).round(1)
 
             # Coluna padrão (mantida como no original)
             df["WBGT"] = df["WBGT_out"]
 
             dados.append(df)
-        except Exception as e:
-            print(f"Erro em {nome}: {e}")
+
+    # Fallback: caso a API volte a responder como um único objeto (1 localização só)
+    elif isinstance(result, dict) and "hourly" in result:
+        hourly = result["hourly"]
+        df = pd.DataFrame(hourly)
+
+        nome = nomes[0]
+        lat  = lats[0]
+        lon  = lons[0]
+
+        df["Capital"]   = nome
+        df["Latitude"]  = lat
+        df["Longitude"] = lon
+
+        df = df.rename(columns={
+            "temperature_2m":          "Ta",
+            "wet_bulb_temperature_2m": "Tw",
+            "shortwave_radiation":     "GHI",
+            "wind_speed_10m":          "Wind"
+        })
+
+        df["Tg_out"] = [
+            tg_black_globe(Ta, ghi, v)
+            for Ta, ghi, v in zip(df["Ta"].values, df["GHI"].values, df["Wind"].values)
+        ]
+        df["Tg_in"] = [
+            tg_black_globe(Ta, 0.0, v)
+            for Ta, v in zip(df["Ta"].values, df["Wind"].values)
+        ]
+
+        df["WBGT_out"] = (0.7 * df["Tw"] + 0.2 * df["Tg_out"] + 0.1 * df["Ta"]).round(1)
+        df["WBGT_in"]  = (0.7 * df["Tw"] + 0.3 * df["Tg_in"]).round(1)
+        df["WBGT"]     = df["WBGT_out"]
+
+        dados.append(df)
+
+    else:
+        raise RuntimeError(
+            "Formato inesperado de resposta da API Open-Meteo "
+            "(nem lista de locais, nem dict com 'hourly')."
+        )
 
     if not dados:
-        # Evita ValueError: No objects to concatenate
         raise RuntimeError(
-            "Nenhuma capital retornou dados válidos da API Open-Meteo. "
-            "Verifique os logs [DEBUG] para o motivo retornado pela API."
+            "Nenhuma capital retornou dados válidos da API Open-Meteo."
         )
 
     return pd.concat(dados, ignore_index=True)
@@ -385,6 +464,7 @@ def atualizar_recomendacao(data, capital, hora, ambiente):
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=10000)
+
 
 
 
