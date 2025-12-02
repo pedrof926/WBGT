@@ -70,17 +70,25 @@ def coletar_dados():
         lat = row["Latitude"]
         lon = row["Longitude"]
         try:
-            response = requests.get(
-                url,
-                params={
-                    "latitude": lat,
-                    "longitude": lon,
-                    "hourly": "temperature_2m,wet_bulb_temperature_2m,shortwave_radiation,wind_speed_10m",
-                    "timezone": "America/Sao_Paulo"
-                },
-                verify=False
-            )
+            params = {
+                "latitude": lat,
+                "longitude": lon,
+                "hourly": "temperature_2m,wet_bulb_temperature_2m,shortwave_radiation,wind_speed_10m",
+                "timezone": "America/Sao_Paulo",
+                "models": "ecmwf_ifs",      # força uso do ECMWF
+                "forecast_days": 7,
+                "wind_speed_unit": "ms"     # vento em m/s
+            }
+
+            response = requests.get(url, params=params, verify=False)
+            response.raise_for_status()
             result = response.json()
+
+            # Se a API retornar erro, não terá "hourly"
+            if "hourly" not in result:
+                print(f"[DEBUG] {nome} sem 'hourly': {result}")
+                continue
+
             df = pd.DataFrame(result["hourly"])
             df["Capital"]  = nome
             df["Latitude"] = lat
@@ -107,6 +115,14 @@ def coletar_dados():
             dados.append(df)
         except Exception as e:
             print(f"Erro em {nome}: {e}")
+
+    if not dados:
+        # Evita ValueError: No objects to concatenate
+        raise RuntimeError(
+            "Nenhuma capital retornou dados válidos da API Open-Meteo. "
+            "Verifique os logs [DEBUG] para o motivo retornado pela API."
+        )
+
     return pd.concat(dados, ignore_index=True)
 
 df_previsao = coletar_dados()
@@ -369,6 +385,7 @@ def atualizar_recomendacao(data, capital, hora, ambiente):
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=10000)
+
 
 
 
