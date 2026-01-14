@@ -323,7 +323,7 @@ def atualizar_grafico(data, capital, ambiente):
     )
     fig.update_xaxes(title="Horas", categoryorder="array", categoryarray=[f"{h:02d}h" for h in range(24)])
     fig.update_layout(
-        yaxis_title="WBGT (°C)",   # mantido como no seu original
+        yaxis_title="WBGT",   # mantido como no seu original
         plot_bgcolor="white",
         paper_bgcolor="white",
         height=500
