@@ -360,7 +360,7 @@ def atualizar_recomendacao(data, capital, hora, ambiente):
         html.P([
             html.Strong(f"{capital} – {data} {hora:02d}:00  "),
             f"WBGT ({'Externo' if ambiente=='out' else 'Interno'}): ",
-            html.Strong(f"{wbgt_val:.1f} °C"),
+            html.Strong(f"{wbgt_val:.1f}"),
             "  |  Risco: ",
             html.Span(risco, style={"backgroundColor": color_map[risco], "padding": "3px 6px", "borderRadius": "4px"})
         ], style={"marginBottom": "8px"}),
