@@ -358,7 +358,7 @@ def atualizar_recomendacao(data, capital, hora):
     return html.Div([
         html.P([
             html.Strong(f"{capital} – {data} {hora:02d}:00  "),
-            "WBGT (Externo): ",
+            "WBGT: ",
             html.Strong(f"{wbgt_val:.1f}"),
             "  |  Risco: ",
             html.Span(risco, style={"backgroundColor": color_map[risco], "padding": "3px 6px", "borderRadius": "4px"})
