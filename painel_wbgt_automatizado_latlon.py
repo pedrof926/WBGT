@@ -16,8 +16,8 @@ color_map = {
     "Normal": "rgb(226,240,217)",
     "Atenção": "rgb(255,242,204)",
     "Alerta": "rgb(248,203,173)",
-    "Perigo": "rgb(255,102,102)",   # vermelho claro (ajustado)
-    "Extremo": "rgb(153,0,0)"       # vermelho escuro (novo)
+    "Perigo": "rgb(255,102,102)",
+    "Extremo": "rgb(153,0,0)"
 }
 
 horarios_filtros = [6, 9, 12, 15, 18, 21]
@@ -93,16 +93,27 @@ def coletar_dados():
                 "wind_speed_10m": "Wind"              # m s-1
             })
 
-            # Tg externo (com sol) e interno (sombra)
-            df["Tg_out"] = [tg_black_globe(Ta, ghi, v) for Ta, ghi, v in zip(df["Ta"].values, df["GHI"].values, df["Wind"].values)]
-            df["Tg_in"]  = [tg_black_globe(Ta, 0.0,  v) for Ta, v        in zip(df["Ta"].values,                 df["Wind"].values)]
+            # ==========================
+            # ✅ SOMENTE WBGT EXTERNO
+            # ==========================
+            # Tg externo (com sol)
+            df["Tg_out"] = [
+                tg_black_globe(Ta, ghi, v)
+                for Ta, ghi, v in zip(df["Ta"].values, df["GHI"].values, df["Wind"].values)
+            ]
 
-            # WBGT oficiais (ISO)
+            # WBGT externo (ISO)
             df["WBGT_out"] = (0.7*df["Tw"] + 0.2*df["Tg_out"] + 0.1*df["Ta"]).round(1)
-            df["WBGT_in"]  = (0.7*df["Tw"] + 0.3*df["Tg_in"]).round(1)
 
-            # Coluna padrão (mantida como no original)
+            # Coluna padrão do app: apenas externo
             df["WBGT"] = df["WBGT_out"]
+
+            # --------------------------
+            # ❌ WBGT INTERNO (comentado)
+            # --------------------------
+            # df["Tg_in"]  = [tg_black_globe(Ta, 0.0,  v) for Ta, v in zip(df["Ta"].values, df["Wind"].values)]
+            # df["WBGT_in"]  = (0.7*df["Tw"] + 0.3*df["Tg_in"]).round(1)
+            # --------------------------
 
             dados.append(df)
         except Exception as e:
@@ -118,35 +129,21 @@ df_previsao["Hora_str"] = df_previsao["time"].dt.strftime("%Hh")
 # ======================
 # 🧭 CLASSIFICAÇÃO DE RISCO (ISO 7243)
 # ======================
-def classificar_risco(wbgt, ambiente="out"):
-    """
-    Classificação do WBGT com limiares ISO para ambientes Externo (out) e Interno (in).
-    """
-    if ambiente == "out":  # Externo (com radiação solar direta)
-        if wbgt < 27.8:
-            return "Normal"
-        elif wbgt < 29.4:
-            return "Atenção"
-        elif wbgt < 31.1:
-            return "Alerta"
-        elif wbgt < 32.2:
-            return "Perigo"
-        else:
-            return "Extremo"
-    else:  # Interno (sem radiação solar direta)
-        if wbgt < 26.5:
-            return "Normal"
-        elif wbgt < 28.0:
-            return "Atenção"
-        elif wbgt < 29.5:
-            return "Alerta"
-        elif wbgt < 30.5:
-            return "Perigo"
-        else:
-            return "Extremo"
+def classificar_risco(wbgt):
+    """Apenas EXTERNO (com radiação solar direta)."""
+    if wbgt < 27.8:
+        return "Normal"
+    elif wbgt < 29.4:
+        return "Atenção"
+    elif wbgt < 31.1:
+        return "Alerta"
+    elif wbgt < 32.2:
+        return "Perigo"
+    else:
+        return "Extremo"
 
-# Classificação inicial (padrão externo, como no original)
-df_previsao["Risco"] = df_previsao["WBGT"].apply(lambda w: classificar_risco(w, "out"))
+# Classificação inicial (externo)
+df_previsao["Risco"] = df_previsao["WBGT"].apply(classificar_risco)
 
 RECOMENDACOES = {
     "Normal": "Hidrate-se regularmente e planeje pausas. Observe grupos sensíveis.",
@@ -192,17 +189,22 @@ app.layout = dbc.Container([
             )
         ], width=2),
 
-        dbc.Col([
-            dcc.RadioItems(
-                id="filtro-ambiente",
-                options=[
-                    {"label": "Externo", "value": "out"},
-                    {"label": "Interno", "value": "in"},
-                ],
-                value="out",
-                inline=True
-            )
-        ], width=5)
+        # --------------------------
+        # ❌ Filtro "Interno/Externo" comentado (agora só externo)
+        # --------------------------
+        # dbc.Col([
+        #     dcc.RadioItems(
+        #         id="filtro-ambiente",
+        #         options=[
+        #             {"label": "Externo", "value": "out"},
+        #             {"label": "Interno", "value": "in"},
+        #         ],
+        #         value="out",
+        #         inline=True
+        #     )
+        # ], width=5),
+        # --------------------------
+
     ], justify="center", className="mb-2"),
 
     dbc.Row([
@@ -236,7 +238,7 @@ app.layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             dbc.Card([
-                dbc.CardHeader("Recomendações para a faixa atual"),
+                dbc.CardHeader("Recomendações para a faixa atual (WBGT Externo)"),
                 dbc.CardBody(id="card-recomendacao", style={"minHeight": "80px"})
             ])
         ], width=12)
@@ -251,18 +253,17 @@ app.layout = dbc.Container([
 @app.callback(
     Output("mapa-wbgt", "figure"),
     [Input("filtro-data", "date"),
-     Input("filtro-hora", "value"),
-     Input("filtro-ambiente", "value")]
+     Input("filtro-hora", "value")]
 )
-def atualizar_mapa(data, hora, ambiente):
+def atualizar_mapa(data, hora):
     data = pd.to_datetime(data).date()
     if hora is None:
         hora = hora_atual
     df_dia = df_previsao[(df_previsao["Data"] == data) & (df_previsao["Hora"] == hora)].copy()
 
-    col = "WBGT_out" if ambiente == "out" else "WBGT_in"
-    df_dia["WBGT"] = df_dia[col]
-    df_dia["Risco"] = [classificar_risco(w, ambiente) for w in df_dia["WBGT"]]
+    # ✅ sempre externo
+    df_dia["WBGT"] = df_dia["WBGT_out"]
+    df_dia["Risco"] = df_dia["WBGT"].apply(classificar_risco)
 
     fig = px.scatter_geo(
         df_dia,
@@ -303,16 +304,15 @@ def atualizar_mapa(data, hora, ambiente):
 @app.callback(
     Output("grafico-horario", "figure"),
     [Input("filtro-data", "date"),
-     Input("filtro-capital", "value"),
-     Input("filtro-ambiente", "value")]
+     Input("filtro-capital", "value")]
 )
-def atualizar_grafico(data, capital, ambiente):
+def atualizar_grafico(data, capital):
     data = pd.to_datetime(data).date()
     df_capital = df_previsao[(df_previsao["Data"] == data) & (df_previsao["Capital"] == capital)].copy()
 
-    col = "WBGT_out" if ambiente == "out" else "WBGT_in"
-    df_capital["WBGT"] = df_capital[col]
-    df_capital["Risco"] = [classificar_risco(w, ambiente) for w in df_capital["WBGT"]]
+    # ✅ sempre externo
+    df_capital["WBGT"] = df_capital["WBGT_out"]
+    df_capital["Risco"] = df_capital["WBGT"].apply(classificar_risco)
 
     fig = px.bar(
         df_capital,
@@ -323,7 +323,7 @@ def atualizar_grafico(data, capital, ambiente):
     )
     fig.update_xaxes(title="Horas", categoryorder="array", categoryarray=[f"{h:02d}h" for h in range(24)])
     fig.update_layout(
-        yaxis_title="WBGT",   # mantido como no seu original
+        yaxis_title="WBGT",
         plot_bgcolor="white",
         paper_bgcolor="white",
         height=500
@@ -334,14 +334,12 @@ def atualizar_grafico(data, capital, ambiente):
     Output("card-recomendacao", "children"),
     [Input("filtro-data", "date"),
      Input("filtro-capital", "value"),
-     Input("filtro-hora", "value"),
-     Input("filtro-ambiente", "value")]
+     Input("filtro-hora", "value")]
 )
-def atualizar_recomendacao(data, capital, hora, ambiente):
+def atualizar_recomendacao(data, capital, hora):
     data = pd.to_datetime(data).date()
     if hora is None:
         hora = hora_atual
-    col = "WBGT_out" if ambiente == "out" else "WBGT_in"
 
     df_sel = df_previsao[
         (df_previsao["Data"] == data) &
@@ -352,14 +350,14 @@ def atualizar_recomendacao(data, capital, hora, ambiente):
     if df_sel.empty:
         return "Sem dados para o filtro selecionado."
 
-    wbgt_val = float(df_sel[col].iloc[0])
-    risco = classificar_risco(wbgt_val, ambiente)
+    wbgt_val = float(df_sel["WBGT_out"].iloc[0])
+    risco = classificar_risco(wbgt_val)
     rec = RECOMENDACOES[risco]
 
     return html.Div([
         html.P([
             html.Strong(f"{capital} – {data} {hora:02d}:00  "),
-            f"WBGT ({'Externo' if ambiente=='out' else 'Interno'}): ",
+            "WBGT (Externo): ",
             html.Strong(f"{wbgt_val:.1f}"),
             "  |  Risco: ",
             html.Span(risco, style={"backgroundColor": color_map[risco], "padding": "3px 6px", "borderRadius": "4px"})
@@ -369,6 +367,7 @@ def atualizar_recomendacao(data, capital, hora, ambiente):
 
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=10000)
+
 
 
 
