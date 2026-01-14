@@ -285,7 +285,14 @@ def atualizar_mapa(data, hora):
         margin={"r":0,"t":0,"l":0,"b":0},
         showlegend=True,
         legend_title_text="Risco:",
-        legend=dict(orientation="h", y=-0.2, x=0.25),
+        legend=dict(
+    orientation="v",
+    y=0.5,
+    yanchor="middle",
+    x=1.02,
+    xanchor="left",
+    title_text="Risco"
+),
         geo=dict(
             resolution=50,
             showcountries=True,
