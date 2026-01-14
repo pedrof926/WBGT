@@ -324,6 +324,7 @@ def atualizar_grafico(data, capital):
     fig.update_xaxes(title="Horas", categoryorder="array", categoryarray=[f"{h:02d}h" for h in range(24)])
     fig.update_layout(
         yaxis_title="WBGT",
+        yaxis=dict(range=[0, 40]),  # eixo Y fixo até 40
         plot_bgcolor="white",
         paper_bgcolor="white",
         height=500
