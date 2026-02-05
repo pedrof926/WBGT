@@ -93,27 +93,13 @@ def coletar_dados():
                 "wind_speed_10m": "Wind"              # m s-1
             })
 
-            # ==========================
             # ✅ SOMENTE WBGT EXTERNO
-            # ==========================
-            # Tg externo (com sol)
             df["Tg_out"] = [
                 tg_black_globe(Ta, ghi, v)
                 for Ta, ghi, v in zip(df["Ta"].values, df["GHI"].values, df["Wind"].values)
             ]
-
-            # WBGT externo (ISO)
             df["WBGT_out"] = (0.7*df["Tw"] + 0.2*df["Tg_out"] + 0.1*df["Ta"]).round(1)
-
-            # Coluna padrão do app: apenas externo
             df["WBGT"] = df["WBGT_out"]
-
-            # --------------------------
-            # ❌ WBGT INTERNO (comentado)
-            # --------------------------
-            # df["Tg_in"]  = [tg_black_globe(Ta, 0.0,  v) for Ta, v in zip(df["Ta"].values, df["Wind"].values)]
-            # df["WBGT_in"]  = (0.7*df["Tw"] + 0.3*df["Tg_in"]).round(1)
-            # --------------------------
 
             dados.append(df)
         except Exception as e:
@@ -142,7 +128,6 @@ def classificar_risco(wbgt):
     else:
         return "Extremo"
 
-# Classificação inicial (externo)
 df_previsao["Risco"] = df_previsao["WBGT"].apply(classificar_risco)
 
 RECOMENDACOES = {
@@ -154,59 +139,52 @@ RECOMENDACOES = {
 }
 
 # ======================
-# 🌍 APP DASH
+# 🌍 APP DASH (RESPONSIVO)
 # ======================
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 app.title = "Painel WBGT"
 
-app.layout = dbc.Container([
-    html.H2("Painel de Risco Térmico (WBGT) - Capitais do Brasil", className="text-center mb-4"),
+# Helpers de estilo (para evitar px fixo e ficar bem no mobile)
+GRAPH_STYLE_MAPA  = {"height": "62vh", "width": "100%"}
+GRAPH_STYLE_BARRA = {"height": "62vh", "width": "100%"}
+CARD_STYLE        = {"minHeight": "90px"}
 
+app.layout = dbc.Container([
+    html.H2("Painel de Risco Térmico (WBGT) - Capitais do Brasil", className="text-center mb-3"),
+
+    # 🔎 Filtros (responsivos)
     dbc.Row([
         dbc.Col([
+            html.Label("Capital", className="fw-bold mb-1"),
             dcc.Dropdown(
                 id='filtro-capital',
                 options=[{"label": c, "value": c} for c in sorted(df_previsao["Capital"].unique())],
                 value="Brasília",
                 clearable=False
             )
-        ], width=3),
+        ], xs=12, sm=12, md=4, lg=4),
 
         dbc.Col([
+            html.Label("Data", className="fw-bold mb-1"),
             dcc.DatePickerSingle(
                 id='filtro-data',
                 min_date_allowed=df_previsao['Data'].min(),
                 max_date_allowed=df_previsao['Data'].max(),
                 date=data_atual
             )
-        ], width=2),
+        ], xs=12, sm=6, md=4, lg=3),
 
         dbc.Col([
+            html.Label("Hora", className="fw-bold mb-1"),
             dcc.Dropdown(
                 id='filtro-hora',
                 options=[{"label": f"{h:02d}:00", "value": h} for h in horarios_filtros],
                 placeholder="Escolha uma hora"
             )
-        ], width=2),
+        ], xs=12, sm=6, md=4, lg=3),
+    ], className="g-2 mb-2", align="end", justify="center"),
 
-        # --------------------------
-        # ❌ Filtro "Interno/Externo" comentado (agora só externo)
-        # --------------------------
-        # dbc.Col([
-        #     dcc.RadioItems(
-        #         id="filtro-ambiente",
-        #         options=[
-        #             {"label": "Externo", "value": "out"},
-        #             {"label": "Interno", "value": "in"},
-        #         ],
-        #         value="out",
-        #         inline=True
-        #     )
-        # ], width=5),
-        # --------------------------
-
-    ], justify="center", className="mb-2"),
-
+    # 🏷️ Legendas (responsivas)
     dbc.Row([
         dbc.Col([
             html.Div("Risco do WBGT:", style={"fontSize": "18px", "marginBottom": "5px", "fontWeight": "bold", "textAlign": "center"}),
@@ -216,8 +194,8 @@ app.layout = dbc.Container([
                 html.Span(" Alerta ",  style={"backgroundColor": color_map["Alerta"],  "padding": "5px", "marginRight": "10px", "borderRadius": "5px"}),
                 html.Span(" Perigo ",  style={"backgroundColor": color_map["Perigo"],  "padding": "5px", "marginRight": "10px", "borderRadius": "5px"}),
                 html.Span(" Extremo ", style={"backgroundColor": color_map["Extremo"], "padding": "5px", "color": "white", "borderRadius": "5px"})
-            ], style={"textAlign": "center", "marginBottom": "10px"})
-        ], width=5),
+            ], style={"textAlign": "center", "marginBottom": "8px"})
+        ], xs=12, md=5),
 
         dbc.Col([
             html.Div([
@@ -231,24 +209,43 @@ app.layout = dbc.Container([
                 html.Span("Perigo  ", style={"marginRight": "15px"}),
                 html.Span("● ", style={"color": color_map["Extremo"], "fontSize": "20px"}),
                 html.Span("Extremo")
-            ], style={"textAlign": "center", "marginBottom": "20px", "fontWeight": "bold"})
-        ], width=7)
-    ]),
+            ], style={"textAlign": "center", "marginBottom": "8px", "fontWeight": "bold"})
+        ], xs=12, md=7)
+    ], className="g-2"),
 
+    # 🧾 Card recomendação
     dbc.Row([
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader("Recomendações para a faixa atual (WBGT Externo)"),
-                dbc.CardBody(id="card-recomendacao", style={"minHeight": "80px"})
+                dbc.CardBody(id="card-recomendacao", style=CARD_STYLE)
             ])
-        ], width=12)
+        ], xs=12)
     ], className="mb-3"),
 
+    # 📌 Área principal (mapa + gráfico) -> responsivo:
+    # - Mobile: empilha (mapa em cima, gráfico em baixo)
+    # - Desktop: lado a lado
     dbc.Row([
-        dbc.Col([ dcc.Graph(id='grafico-horario', style={"height": "700px"}) ], width=5),
-        dbc.Col([ dcc.Graph(id='mapa-wbgt',    style={"height": "600px"}) ], width=7)
-    ])
+        dbc.Col([
+            dcc.Graph(
+                id='mapa-wbgt',
+                style=GRAPH_STYLE_MAPA,
+                config={"responsive": True}
+            )
+        ], xs=12, lg=7),
+
+        dbc.Col([
+            dcc.Graph(
+                id='grafico-horario',
+                style=GRAPH_STYLE_BARRA,
+                config={"responsive": True}
+            )
+        ], xs=12, lg=5),
+    ], className="g-2")
+
 ], fluid=True)
+
 
 @app.callback(
     Output("mapa-wbgt", "figure"),
@@ -259,9 +256,9 @@ def atualizar_mapa(data, hora):
     data = pd.to_datetime(data).date()
     if hora is None:
         hora = hora_atual
+
     df_dia = df_previsao[(df_previsao["Data"] == data) & (df_previsao["Hora"] == hora)].copy()
 
-    # ✅ sempre externo
     df_dia["WBGT"] = df_dia["WBGT_out"]
     df_dia["Risco"] = df_dia["WBGT"].apply(classificar_risco)
 
@@ -286,13 +283,13 @@ def atualizar_mapa(data, hora):
         showlegend=True,
         legend_title_text="Risco:",
         legend=dict(
-    orientation="v",
-    y=0.5,
-    yanchor="middle",
-    x=1.02,
-    xanchor="left",
-    title_text="Risco"
-),
+            orientation="v",
+            y=0.5,
+            yanchor="middle",
+            x=1.02,
+            xanchor="left",
+            title_text="Risco"
+        ),
         geo=dict(
             resolution=50,
             showcountries=True,
@@ -308,6 +305,7 @@ def atualizar_mapa(data, hora):
     )
     return fig
 
+
 @app.callback(
     Output("grafico-horario", "figure"),
     [Input("filtro-data", "date"),
@@ -317,7 +315,6 @@ def atualizar_grafico(data, capital):
     data = pd.to_datetime(data).date()
     df_capital = df_previsao[(df_previsao["Data"] == data) & (df_previsao["Capital"] == capital)].copy()
 
-    # ✅ sempre externo
     df_capital["WBGT"] = df_capital["WBGT_out"]
     df_capital["Risco"] = df_capital["WBGT"].apply(classificar_risco)
 
@@ -331,18 +328,20 @@ def atualizar_grafico(data, capital):
     fig.update_xaxes(title="Horas", categoryorder="array", categoryarray=[f"{h:02d}h" for h in range(24)])
     fig.update_layout(
         title={
-        "text": capital,          # título dinâmico
-        "x": 0.5,                 # centralizado
-        "xanchor": "center",
-        "font": {"size": 18}
-    },
+            "text": capital,
+            "x": 0.5,
+            "xanchor": "center",
+            "font": {"size": 18}
+        },
         yaxis_title="WBGT",
-        yaxis=dict(range=[0, 40]),  # eixo Y fixo até 40
+        yaxis=dict(range=[0, 40]),
         plot_bgcolor="white",
         paper_bgcolor="white",
-        height=500
+        margin={"r":10,"t":55,"l":10,"b":10},
+        height=None  # deixa o style (vh) mandar na altura
     )
     return fig
+
 
 @app.callback(
     Output("card-recomendacao", "children"),
@@ -374,13 +373,18 @@ def atualizar_recomendacao(data, capital, hora):
             "WBGT: ",
             html.Strong(f"{wbgt_val:.1f}"),
             "  |  Risco: ",
-            html.Span(risco, style={"backgroundColor": color_map[risco], "padding": "3px 6px", "borderRadius": "4px"})
+            html.Span(
+                risco,
+                style={"backgroundColor": color_map[risco], "padding": "3px 6px", "borderRadius": "4px"}
+            )
         ], style={"marginBottom": "8px"}),
         html.P(rec, style={"marginBottom": 0})
     ])
 
+
 if __name__ == "__main__":
     app.run(debug=False, host="0.0.0.0", port=10000)
+
 
 
 
